@@ -34,7 +34,7 @@ use sozu_command::proxy::{Application,CertFingerprint,CertificateAndKey,
 use sozu_command::logging;
 use sozu_command::buffer::fixed::Buffer;
 
-use protocol::http::{parser::{RequestState,RRequestLine,hostname_and_port}, answers::{DefaultAnswers, CustomAnswers, HttpAnswers}};
+use protocol::http::{parser::{RequestState,RRequestLine,hostname_and_port}, answers::HttpAnswers};
 use pool::Pool;
 use {AppId,Backend,SessionResult,ConnectionError,Protocol,Readiness,SessionMetrics,
   ProxySession,ProxyConfiguration,AcceptError,BackendConnectAction,BackendConnectionStatus,
@@ -1033,7 +1033,7 @@ impl Listener {
       error!("could not set ALPN protocols: {:?}", e);
     }
 
-    context.set_alpn_select_callback(move |ssl: &mut SslRef, client_protocols: &[u8]| {
+    context.set_alpn_select_callback(move |_ssl: &mut SslRef, client_protocols: &[u8]| {
       debug!("got protocols list from client: {:?}", unsafe { from_utf8_unchecked(client_protocols) });
       match select_next_proto(SERVER_PROTOS, client_protocols) {
         None => Err(AlpnError::ALERT_FATAL),
@@ -1128,7 +1128,7 @@ impl Listener {
       error!("could not set ALPN protocols: {:?}", e);
     }
 
-    ctx.set_alpn_select_callback(move |ssl: &mut SslRef, client_protocols: &[u8]| {
+    ctx.set_alpn_select_callback(move |_ssl: &mut SslRef, client_protocols: &[u8]| {
       debug!("got protocols list from client: {:?}", unsafe { from_utf8_unchecked(client_protocols) });
       match select_next_proto(SERVER_PROTOS, client_protocols) {
         None => Err(AlpnError::ALERT_FATAL),
@@ -1271,7 +1271,7 @@ impl Listener {
     self.fronts.lookup(host.as_bytes(), uri.as_bytes())
   }
 
-  fn accept(&mut self, token: ListenToken) -> Result<TcpStream, AcceptError> {
+  fn accept(&mut self) -> Result<TcpStream, AcceptError> {
     if let Some(ref sock) = self.listener {
       sock.accept().map_err(|e| {
         match e.kind() {
@@ -1502,7 +1502,7 @@ impl Proxy {
 
 impl ProxyConfiguration<Session> for Proxy {
   fn accept(&mut self, token: ListenToken) -> Result<TcpStream, AcceptError> {
-    self.listeners.get_mut(&Token(token.0)).unwrap().accept(token)
+    self.listeners.get_mut(&Token(token.0)).unwrap().accept()
   }
 
   fn create_session(&mut self, frontend_sock: TcpStream, token: ListenToken, poll: &mut Poll, session_token: Token, timeout: Timeout, delay: Duration)
@@ -1642,7 +1642,7 @@ impl ProxyConfiguration<Session> for Proxy {
       },
       ProxyRequestData::AddHttpsFront(front) => {
         //info!("HTTPS\t{} add front {:?}", id, front);
-        if let Some(mut listener) = self.listeners.values_mut().find(|l| l.address == front.address) {
+        if let Some(listener) = self.listeners.values_mut().find(|l| l.address == front.address) {
           listener.add_https_front(front);
           ProxyResponse{ id: message.id, status: ProxyResponseStatus::Ok, data: None }
         } else {
@@ -1651,7 +1651,7 @@ impl ProxyConfiguration<Session> for Proxy {
       },
       ProxyRequestData::RemoveHttpsFront(front) => {
         //info!("HTTPS\t{} remove front {:?}", id, front);
-        if let Some(mut listener) = self.listeners.values_mut().find(|l| l.address == front.address) {
+        if let Some(listener) = self.listeners.values_mut().find(|l| l.address == front.address) {
           listener.remove_https_front(front);
           ProxyResponse{ id: message.id, status: ProxyResponseStatus::Ok, data: None }
         } else {
@@ -1659,7 +1659,7 @@ impl ProxyConfiguration<Session> for Proxy {
         }
       },
       ProxyRequestData::AddCertificate(add_certificate) => {
-        if let Some(mut listener) = self.listeners.values_mut().find(|l| l.address == add_certificate.front) {
+        if let Some(listener) = self.listeners.values_mut().find(|l| l.address == add_certificate.front) {
           //info!("HTTPS\t{} add certificate: {:?}", id, certificate_and_key);
           listener.add_certificate(add_certificate.certificate);
           ProxyResponse{ id: message.id, status: ProxyResponseStatus::Ok, data: None }
@@ -1669,7 +1669,7 @@ impl ProxyConfiguration<Session> for Proxy {
         }
       },
       ProxyRequestData::RemoveCertificate(remove_certificate) => {
-        if let Some(mut listener) = self.listeners.values_mut().find(|l| l.address == remove_certificate.front) {
+        if let Some(listener) = self.listeners.values_mut().find(|l| l.address == remove_certificate.front) {
           //info!("TLS\t{} remove certificate with fingerprint {:?}", id, fingerprint);
           listener.remove_certificate(remove_certificate.fingerprint);
           //FIXME: should return an error if certificate still has fronts referencing it
@@ -1679,7 +1679,7 @@ impl ProxyConfiguration<Session> for Proxy {
         }
       },
       ProxyRequestData::ReplaceCertificate(replace) => {
-        if let Some(mut listener) = self.listeners.values_mut().find(|l| l.address == replace.front) {
+        if let Some(listener) = self.listeners.values_mut().find(|l| l.address == replace.front) {
           //info!("TLS\t{} replace certificate of fingerprint {:?} with {:?}", id,
           //  replace.old_fingerprint, replace.new_certificate);
           listener.remove_certificate(replace.old_fingerprint);
@@ -1732,7 +1732,7 @@ impl ProxyConfiguration<Session> for Proxy {
         ProxyResponse{ id: message.id, status: ProxyResponseStatus::Ok, data: None }
       },
       ProxyRequestData::Query(Query::Certificates(QueryCertificateType::All)) => {
-        let res = self.listeners.iter().map(|(addr, listener)| {
+        let res = self.listeners.iter().map(|(_addr, listener)| {
           let mut domains = unwrap_msg!(listener.domains.lock()).to_hashmap();
           let res = domains.drain().map(|(k, v)| {
             (String::from_utf8(k).unwrap(), v.0.clone())
@@ -1747,7 +1747,7 @@ impl ProxyConfiguration<Session> for Proxy {
           data: Some(ProxyResponseData::Query(QueryAnswer::Certificates(QueryAnswerCertificate::All(res)))) }
       },
       ProxyRequestData::Query(Query::Certificates(QueryCertificateType::Domain(d))) => {
-        let res = self.listeners.iter().map(|(addr, listener)| {
+        let res = self.listeners.iter().map(|(_addr, listener)| {
           let domains  = unwrap_msg!(listener.domains.lock());
           (listener.address, domains.domain_lookup(d.as_bytes(), true).map(|(k, v)| {
             (String::from_utf8(k.to_vec()).unwrap(), v.0.clone())
@@ -1835,7 +1835,7 @@ pub fn start(config: HttpsListener, channel: ProxyChannel, max_buffers: usize, b
   ));
   let backends = Rc::new(RefCell::new(BackendMap::new()));
 
-  let mut sessions: Slab<Rc<RefCell<ProxySessionCast>>,SessionToken> = Slab::with_capacity(max_buffers);
+  let mut sessions: Slab<Rc<RefCell<dyn ProxySessionCast>>,SessionToken> = Slab::with_capacity(max_buffers);
   {
     let entry = sessions.vacant_entry().expect("session list should have enough room at startup");
     info!("taking token {:?} for channel", entry.index());
@@ -1885,7 +1885,6 @@ mod tests {
   use std::str::FromStr;
   use std::rc::Rc;
   use std::sync::{Arc,Mutex};
-  use protocol::http::answers::DefaultAnswers;
   use router::{trie::TrieNode,Router,PathRule};
   use openssl::ssl::{SslContext, SslMethod};
 
